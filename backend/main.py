@@ -39,9 +39,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="IDX Stock Screener API", version="1.0.0", lifespan=lifespan)
 
+import os
+
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,https://dan-idx-stock.vercel.app",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
