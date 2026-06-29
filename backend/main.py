@@ -21,7 +21,7 @@ async def warm_cache() -> None:
     await loop.run_in_executor(None, get_all_stocks_summary)
     # Step 2: fundamentals (sequential, ~35s) — runs in thread, doesn't block
     fundamentals = await loop.run_in_executor(
-        None, fetch_fundamental_batch, TICKER_SYMBOLS, 1.0
+        None, fetch_fundamental_batch, TICKER_SYMBOLS
     )
     merge_fundamentals_into_summary(fundamentals)
     print(f"[cache] Warmed {len(TICKER_SYMBOLS)} stocks with fundamentals.")

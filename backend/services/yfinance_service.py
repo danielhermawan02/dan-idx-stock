@@ -8,6 +8,7 @@ import requests
 import yfinance as yf
 
 from data.tickers import IDX_TICKERS, TICKER_SYMBOLS, TICKER_MAP
+from data.static_fundamentals import STATIC_FUNDAMENTALS
 from services.cache_service import cache_get, cache_set
 
 _fetch_lock = threading.Lock()
@@ -123,6 +124,31 @@ def _latest_timeseries_value(series: list[dict]) -> Optional[float]:
     return _safe_float(latest)
 
 
+def _get_timeseries_series(result: list[dict], series_key: str) -> list[float]:
+    """Extract full series of raw values for a given key from timeseries result."""
+    for item in result:
+        for key in item:
+            if key == series_key:
+                entries = item.get(key) or []
+                values = []
+                for e in entries:
+                    if isinstance(e, dict):
+                        raw = _extract_raw(e.get("reportedValue") or e.get("dataValue"))
+                    else:
+                        raw = _safe_float(e)
+                    if raw is not None:
+                        values.append(raw)
+                return values
+    return []
+
+
+def _compute_growth(values: list[float]) -> Optional[float]:
+    """Compute YoY growth rate from latest two values."""
+    if len(values) >= 2 and values[-2] != 0:
+        return (values[-1] - values[-2]) / values[-2]
+    return None
+
+
 def _fetch_timeseries_fundamentals(ticker: str) -> dict:
     """Fetch lighter Yahoo fundamentals-timeseries data for IDX tickers.
 
@@ -153,12 +179,23 @@ def _fetch_timeseries_fundamentals(ticker: str) -> dict:
     total_assets = by_type.get("quarterlyTotalAssets") or by_type.get("annualTotalAssets")
     total_debt = by_type.get("quarterlyTotalDebt") or by_type.get("annualTotalDebt")
 
+    # Compute ROE from net_income / (total_assets - total_debt)
+    roe = None
+    if net_income is not None and total_assets is not None and total_debt is not None:
+        equity = total_assets - total_debt
+        if equity > 0:
+            roe = net_income / equity
+
+    # Compute revenue growth from raw series
+    rev_series = _get_timeseries_series(result, "annualTotalRevenue")
+    revenue_growth = _compute_growth(rev_series)
+
     return {
         "pe_ratio": by_type.get("trailingPeRatio"),
         "pb_ratio": by_type.get("trailingPbRatio"),
-        "roe": None,
+        "roe": roe,
         "market_cap": by_type.get("trailingMarketCap"),
-        "revenue_growth": None,
+        "revenue_growth": revenue_growth,
         "dividend_yield": by_type.get("trailingDividendYield"),
         "revenue": revenue,
         "net_income": net_income,
@@ -214,7 +251,7 @@ def fetch_bulk_price_snapshot(tickers: list[str], delay: float = 0.3) -> dict[st
 # Fundamental batch
 # ---------------------------------------------------------------------------
 
-def fetch_fundamental_batch(tickers: list[str], delay: float = 1.0) -> dict[str, dict]:
+def fetch_fundamental_batch(tickers: list[str], delay: float = 0.3) -> dict[str, dict]:
     """Fetch fundamentals + RSI for each ticker sequentially."""
     result: dict[str, dict] = {}
     null_entry = {k: None for k in [
@@ -265,7 +302,7 @@ def fetch_fundamental_batch(tickers: list[str], delay: float = 1.0) -> dict[str,
                 result[ticker] = {**null_entry, **_fetch_timeseries_fundamentals(ticker), "rsi": rsi_val}
             except Exception as fallback_exc:
                 logger.warning("Failed to fetch timeseries fundamentals for %s: %s", ticker, fallback_exc)
-                result[ticker] = null_entry.copy()
+                result[ticker] = {**null_entry, **STATIC_FUNDAMENTALS.get(ticker, {})}
         time.sleep(delay)
     return result
 

@@ -1,0 +1,42 @@
+STATIC_FUNDAMENTALS: dict[str, dict] = {
+    "WIKA.JK": {
+        "pe_ratio": None,
+        "pb_ratio": 1.10,
+        "roe": None,
+        "market_cap": 9740000000000,
+        "revenue_growth": None,
+        "dividend_yield": None,
+    },
+    "WSKT.JK": {
+        "pe_ratio": None,
+        "pb_ratio": None,
+        "roe": None,
+        "market_cap": 5820000000000,
+        "revenue_growth": None,
+        "dividend_yield": None,
+    },
+    "KAEF.JK": {
+        "pe_ratio": None,
+        "pb_ratio": None,
+        "roe": None,
+        "market_cap": 2460000000000,
+        "revenue_growth": None,
+        "dividend_yield": None,
+    },
+    "GOTO.JK": {
+        "pe_ratio": None,
+        "pb_ratio": 1.66,
+        "roe": None,
+        "market_cap": 53000000000000,
+        "revenue_growth": None,
+        "dividend_yield": None,
+    },
+    "LINK.JK": {
+        "pe_ratio": None,
+        "pb_ratio": None,
+        "roe": None,
+        "market_cap": None,
+        "revenue_growth": None,
+        "dividend_yield": None,
+    },
+}
