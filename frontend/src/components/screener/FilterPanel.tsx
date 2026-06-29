@@ -3,7 +3,6 @@ import { ScreenerFilters } from "@/types/screener";
 import { SECTORS } from "@/lib/constants";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import {
   Select,
@@ -58,7 +57,7 @@ function RangeInput({
             onChange(minKey, e.target.value === "" ? undefined : Number(e.target.value))
           }
         />
-        <span className="text-slate-300 text-xs shrink-0">–</span>
+        <span className="text-slate-300 text-xs shrink-0">-</span>
         <Input
           type="number"
           placeholder="Max"
@@ -182,7 +181,7 @@ export function FilterPanel({ filters, onChange, onClear, activeCount }: Props) 
             <div className="flex items-center justify-between">
               <Label className="text-xs text-slate-500">RSI</Label>
               <span className="text-xs font-mono font-medium text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">
-                {rsiMin}–{rsiMax}
+                {rsiMin}-{rsiMax}
               </span>
             </div>
             <Slider

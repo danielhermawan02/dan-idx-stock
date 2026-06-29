@@ -139,7 +139,7 @@ export default function StockDetailPage({ params }: { params: Promise<{ ticker: 
         {histLoading ? (
           <Skeleton className="h-[300px] w-full rounded-lg" />
         ) : (
-          <PriceChart history={history} sma20={detail.sma20} sma50={detail.sma50} sma200={detail.sma200} />
+          <PriceChart history={history} />
         )}
       </div>
 

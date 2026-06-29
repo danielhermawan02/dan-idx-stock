@@ -33,7 +33,7 @@ function SortIcon({ sorted }: { sorted: false | "asc" | "desc" }) {
 }
 
 function ChangePill({ value }: { value: number | null }) {
-  if (value == null) return <span className="text-slate-400 text-xs">—</span>;
+  if (value == null) return <span className="text-slate-400 text-xs">-</span>;
   const isUp = value > 0;
   const isDown = value < 0;
   return (
@@ -60,7 +60,11 @@ function WatchlistToggle({ ticker }: { ticker: string }) {
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        watched ? remove(ticker) : add(ticker);
+        if (watched) {
+          void remove(ticker);
+        } else {
+          void add(ticker);
+        }
       }}
       className={cn(
         "rounded p-1 transition-colors",
@@ -136,7 +140,7 @@ const columns = [
       const v = info.getValue();
       return (
         <span className="text-sm font-mono tabular-nums text-slate-700">
-          {v != null ? formatPercent(v * 100, 1) : "—"}
+          {v != null ? formatPercent(v * 100, 1) : "-"}
         </span>
       );
     },
@@ -147,7 +151,7 @@ const columns = [
       const v = info.getValue();
       return (
         <span className="text-sm font-mono tabular-nums text-slate-700">
-          {v != null ? formatPercent(v * 100, 1) : "—"}
+          {v != null ? formatPercent(v * 100, 1) : "-"}
         </span>
       );
     },
@@ -162,7 +166,7 @@ const columns = [
     header: "RSI",
     cell: (info) => {
       const v = info.getValue();
-      if (v == null) return <span className="text-slate-300 text-xs">—</span>;
+      if (v == null) return <span className="text-slate-300 text-xs">-</span>;
       return (
         <span className={cn("rounded px-1.5 py-0.5 text-xs font-mono font-semibold tabular-nums", getRsiColor(v))}>
           {v.toFixed(1)}
@@ -185,6 +189,7 @@ interface Props {
 export function StockTable({ stocks, isLoading }: Props) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table intentionally returns function-bearing table instances.
   const table = useReactTable({
     data: stocks,
     columns,

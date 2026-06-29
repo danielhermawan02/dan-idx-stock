@@ -1,6 +1,6 @@
 import time
 import threading
-import traceback
+import logging
 from typing import Optional
 import numpy as np
 import pandas as pd
@@ -11,6 +11,8 @@ from data.tickers import IDX_TICKERS, TICKER_SYMBOLS, TICKER_MAP
 from services.cache_service import cache_get, cache_set
 
 _fetch_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+YAHOO_TIMEOUT = (5, 10)
 
 # Shared session with browser headers to avoid Yahoo Finance rate-limit/crumb issues
 _session = requests.Session()
@@ -30,6 +32,21 @@ _YF_SUMMARY_URL = (
     "https://query1.finance.yahoo.com/v11/finance/quoteSummary/{ticker}"
     "?modules=defaultKeyStatistics,financialData,summaryDetail,assetProfile"
 )
+_YF_TIMESERIES_URL = "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{ticker}"
+_TIMESERIES_TYPES = [
+    "trailingMarketCap",
+    "trailingPeRatio",
+    "trailingPbRatio",
+    "trailingDividendYield",
+    "annualTotalRevenue",
+    "quarterlyTotalRevenue",
+    "annualNetIncome",
+    "quarterlyNetIncome",
+    "annualTotalAssets",
+    "quarterlyTotalAssets",
+    "annualTotalDebt",
+    "quarterlyTotalDebt",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +84,7 @@ def _compute_macd(close: pd.Series, fast=12, slow=26, signal=9):
 def _fetch_chart(ticker: str, range_str: str = "5d") -> dict:
     """Fetch Yahoo Finance v8 chart data directly."""
     url = _YF_CHART_URL.format(ticker=ticker, range=range_str)
-    r = _session.get(url, timeout=15)
+    r = _session.get(url, timeout=YAHOO_TIMEOUT)
     r.raise_for_status()
     data = r.json()
     results = data.get("chart", {}).get("result")
@@ -79,7 +96,7 @@ def _fetch_chart(ticker: str, range_str: str = "5d") -> dict:
 def _fetch_quote_summary(ticker: str) -> dict:
     """Fetch Yahoo Finance quoteSummary for fundamentals."""
     url = _YF_SUMMARY_URL.format(ticker=ticker)
-    r = _session.get(url, timeout=15)
+    r = _session.get(url, timeout=YAHOO_TIMEOUT)
     r.raise_for_status()
     data = r.json()
     qs = data.get("quoteSummary", {})
@@ -93,6 +110,70 @@ def _fetch_quote_summary(ticker: str) -> dict:
     for module in result:
         merged.update(module)
     return merged
+
+
+def _latest_timeseries_value(series: list[dict]) -> Optional[float]:
+    if not series:
+        return None
+    latest = series[-1]
+    if isinstance(latest, dict):
+        if "reportedValue" in latest:
+            return _extract_raw(latest.get("reportedValue"))
+        return _safe_float(latest.get("dataValue"))
+    return _safe_float(latest)
+
+
+def _fetch_timeseries_fundamentals(ticker: str) -> dict:
+    """Fetch lighter Yahoo fundamentals-timeseries data for IDX tickers.
+
+    quoteSummary returns 404 for several .JK symbols, while this endpoint still
+    returns commonly needed screener metrics.
+    """
+    period2 = int(time.time())
+    period1 = period2 - 86400 * 800
+    params = {
+        "symbol": ticker,
+        "type": ",".join(_TIMESERIES_TYPES),
+        "period1": period1,
+        "period2": period2,
+    }
+    r = _session.get(_YF_TIMESERIES_URL.format(ticker=ticker), params=params, timeout=YAHOO_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    result = data.get("timeseries", {}).get("result") or []
+    by_type = {
+        key: _latest_timeseries_value(item.get(key) or [])
+        for item in result
+        for key in item
+        if key not in {"meta", "timestamp"}
+    }
+
+    revenue = by_type.get("annualTotalRevenue") or by_type.get("quarterlyTotalRevenue")
+    net_income = by_type.get("annualNetIncome") or by_type.get("quarterlyNetIncome")
+    total_assets = by_type.get("quarterlyTotalAssets") or by_type.get("annualTotalAssets")
+    total_debt = by_type.get("quarterlyTotalDebt") or by_type.get("annualTotalDebt")
+
+    return {
+        "pe_ratio": by_type.get("trailingPeRatio"),
+        "pb_ratio": by_type.get("trailingPbRatio"),
+        "roe": None,
+        "market_cap": by_type.get("trailingMarketCap"),
+        "revenue_growth": None,
+        "dividend_yield": by_type.get("trailingDividendYield"),
+        "revenue": revenue,
+        "net_income": net_income,
+        "total_assets": total_assets,
+        "total_debt": total_debt,
+    }
+
+
+def _fetch_rsi(ticker: str, range_str: str = "1mo") -> Optional[float]:
+    chart = _fetch_chart(ticker, range_str=range_str)
+    closes_raw = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    closes = pd.Series([c for c in closes_raw if c is not None], dtype=float)
+    if len(closes) < 15:
+        return None
+    return _safe_float(_compute_rsi(closes).iloc[-1])
 
 
 def _extract_raw(obj) -> Optional[float]:
@@ -122,7 +203,8 @@ def fetch_bulk_price_snapshot(tickers: list[str], delay: float = 0.3) -> dict[st
                 if price and prev_close and prev_close != 0 else None
             )
             result[ticker] = {"price": price, "change_pct": change_pct, "volume": volume}
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to fetch price snapshot for %s: %s", ticker, exc)
             result[ticker] = empty
         time.sleep(delay)
     return result
@@ -150,22 +232,17 @@ def fetch_fundamental_batch(tickers: list[str], delay: float = 1.0) -> dict[str,
             detail = summary.get("summaryDetail", {})
             profile = summary.get("assetProfile", {})
 
-            # RSI from 1-month chart history
             rsi_val = None
             try:
-                chart = _fetch_chart(ticker, range_str="1mo")
-                closes_raw = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                closes = pd.Series([c for c in closes_raw if c is not None], dtype=float)
-                if len(closes) >= 15:
-                    rsi_val = _safe_float(_compute_rsi(closes).iloc[-1])
-            except Exception:
-                pass
+                rsi_val = _fetch_rsi(ticker)
+            except Exception as exc:
+                logger.warning("Failed to compute RSI for %s during fundamentals fetch: %s", ticker, exc)
 
             result[ticker] = {
                 "pe_ratio": _extract_raw(detail.get("trailingPE")),
                 "pb_ratio": _extract_raw(stats.get("priceToBook")),
                 "roe": _extract_raw(fin.get("returnOnEquity")),
-                "market_cap": _extract_raw(summary.get("marketCap") or detail.get("marketCap")),
+                "market_cap": _extract_raw(detail.get("marketCap") or summary.get("marketCap")),
                 "revenue_growth": _extract_raw(fin.get("revenueGrowth")),
                 "dividend_yield": _extract_raw(detail.get("dividendYield") or detail.get("trailingAnnualDividendYield")),
                 "rsi": rsi_val,
@@ -177,8 +254,18 @@ def fetch_fundamental_batch(tickers: list[str], delay: float = 1.0) -> dict[str,
                 "total_assets": _extract_raw(fin.get("totalAssets") or summary.get("totalAssets")),
                 "total_debt": _extract_raw(fin.get("totalDebt") or summary.get("totalDebt")),
             }
-        except Exception:
-            result[ticker] = null_entry.copy()
+        except Exception as exc:
+            logger.warning("Failed to fetch quoteSummary fundamentals for %s: %s", ticker, exc)
+            try:
+                rsi_val = None
+                try:
+                    rsi_val = _fetch_rsi(ticker)
+                except Exception as rsi_exc:
+                    logger.warning("Failed to compute RSI for %s during fundamentals fallback: %s", ticker, rsi_exc)
+                result[ticker] = {**null_entry, **_fetch_timeseries_fundamentals(ticker), "rsi": rsi_val}
+            except Exception as fallback_exc:
+                logger.warning("Failed to fetch timeseries fundamentals for %s: %s", ticker, fallback_exc)
+                result[ticker] = null_entry.copy()
         time.sleep(delay)
     return result
 
@@ -264,8 +351,8 @@ def calculate_technical_indicators(ticker: str, period: str = "6mo") -> dict:
             "rsi_history": rsi_history,
             "macd_history": macd_history,
         }
-    except Exception:
-        traceback.print_exc()
+    except Exception as exc:
+        logger.warning("Failed to calculate technical indicators for %s: %s", ticker, exc)
         return empty
 
 
@@ -301,8 +388,8 @@ def fetch_price_history(ticker: str, period: str = "3mo") -> list[dict]:
                 "volume": _safe_float(volumes[i] if i < len(volumes) else None),
             })
         return bars
-    except Exception:
-        traceback.print_exc()
+    except Exception as exc:
+        logger.warning("Failed to fetch price history for %s (%s): %s", ticker, period, exc)
         return []
 
 
@@ -378,56 +465,80 @@ def get_stock_detail(ticker: str) -> Optional[dict]:
         return None
 
     entry = TICKER_MAP[ticker]
+    summary_stocks = cache_get("stocks:summary") or []
+    summary_fallback = next(
+        (stock for stock in summary_stocks if stock.get("ticker") == ticker),
+        {},
+    )
+
+    price = summary_fallback.get("price")
+    change_pct = summary_fallback.get("change_pct")
+    volume = summary_fallback.get("volume")
+    market_cap = summary_fallback.get("market_cap")
+    fin = stats = detail_data = profile = {}
+
     try:
         chart_5d = _fetch_chart(ticker, range_str="5d")
         meta = chart_5d.get("meta", {})
-        price = _safe_float(meta.get("regularMarketPrice"))
+        price = _safe_float(meta.get("regularMarketPrice")) or price
         prev_close = _safe_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
         change_pct = (
             _safe_float((price - prev_close) / prev_close * 100)
             if price and prev_close and prev_close != 0 else None
-        )
-        volume = _safe_float(meta.get("regularMarketVolume"))
+        ) or change_pct
+        volume = _safe_float(meta.get("regularMarketVolume")) or volume
+        market_cap = _safe_float(meta.get("marketCap")) or market_cap
+    except Exception as exc:
+        logger.warning("Failed to fetch latest chart data for %s: %s", ticker, exc)
 
+    try:
+        summary = _fetch_quote_summary(ticker)
+        fin = summary.get("financialData", {})
+        stats = summary.get("defaultKeyStatistics", {})
+        detail_data = summary.get("summaryDetail", {})
+        profile = summary.get("assetProfile", {})
+        market_cap = _extract_raw(detail_data.get("marketCap")) or market_cap
+    except Exception as exc:
+        logger.warning("Failed to fetch quote summary for %s: %s", ticker, exc)
         try:
-            summary = _fetch_quote_summary(ticker)
-            fin = summary.get("financialData", {})
-            stats = summary.get("defaultKeyStatistics", {})
-            detail_data = summary.get("summaryDetail", {})
-            profile = summary.get("assetProfile", {})
-            market_cap = _extract_raw(detail_data.get("marketCap")) or _safe_float(meta.get("marketCap"))
-        except Exception:
-            fin = stats = detail_data = profile = {}
-            market_cap = _safe_float(meta.get("marketCap"))
+            timeseries = _fetch_timeseries_fundamentals(ticker)
+            market_cap = timeseries.get("market_cap") or market_cap
+        except Exception as fallback_exc:
+            logger.warning("Failed to fetch timeseries fundamentals for %s: %s", ticker, fallback_exc)
+            timeseries = {}
+    else:
+        timeseries = {}
 
-        technicals = calculate_technical_indicators(ticker, period="6mo")
-        price_history = fetch_price_history(ticker, period="1y")
+    technicals = calculate_technical_indicators(ticker, period="6mo")
+    price_history = fetch_price_history(ticker, period="1y")
 
-        detail = {
-            "ticker": ticker,
-            "name": entry["name"],
-            "sector": entry["sector"],
-            "price": price,
-            "change_pct": change_pct,
-            "market_cap": market_cap,
-            "pe_ratio": _extract_raw(detail_data.get("trailingPE")),
-            "pb_ratio": _extract_raw(stats.get("priceToBook")),
-            "roe": _extract_raw(fin.get("returnOnEquity")),
-            "revenue_growth": _extract_raw(fin.get("revenueGrowth")),
-            "dividend_yield": _extract_raw(detail_data.get("dividendYield") or detail_data.get("trailingAnnualDividendYield")),
-            "volume": volume,
-            "description": profile.get("longBusinessSummary"),
-            "website": profile.get("website"),
-            "employees": profile.get("fullTimeEmployees"),
-            "revenue": _extract_raw(fin.get("totalRevenue")),
-            "net_income": _extract_raw(fin.get("netIncomeToCommon")),
-            "total_assets": _extract_raw(fin.get("totalAssets")),
-            "total_debt": _extract_raw(fin.get("totalDebt")),
-            "price_history": price_history,
-            **technicals,
-        }
+    detail = {
+        "ticker": ticker,
+        "name": entry["name"],
+        "sector": entry["sector"],
+        "price": price,
+        "change_pct": change_pct,
+        "market_cap": market_cap,
+        "pe_ratio": _extract_raw(detail_data.get("trailingPE")) or timeseries.get("pe_ratio") or summary_fallback.get("pe_ratio"),
+        "pb_ratio": _extract_raw(stats.get("priceToBook")) or timeseries.get("pb_ratio") or summary_fallback.get("pb_ratio"),
+        "roe": _extract_raw(fin.get("returnOnEquity")) or timeseries.get("roe") or summary_fallback.get("roe"),
+        "revenue_growth": _extract_raw(fin.get("revenueGrowth")) or timeseries.get("revenue_growth") or summary_fallback.get("revenue_growth"),
+        "dividend_yield": (
+            _extract_raw(detail_data.get("dividendYield") or detail_data.get("trailingAnnualDividendYield"))
+            or timeseries.get("dividend_yield")
+            or summary_fallback.get("dividend_yield")
+        ),
+        "volume": volume,
+        "description": profile.get("longBusinessSummary"),
+        "website": profile.get("website"),
+        "employees": profile.get("fullTimeEmployees"),
+        "revenue": _extract_raw(fin.get("totalRevenue")) or timeseries.get("revenue"),
+        "net_income": _extract_raw(fin.get("netIncomeToCommon")) or timeseries.get("net_income"),
+        "total_assets": _extract_raw(fin.get("totalAssets")) or timeseries.get("total_assets"),
+        "total_debt": _extract_raw(fin.get("totalDebt")) or timeseries.get("total_debt"),
+        "price_history": price_history,
+        **technicals,
+    }
+    if any(detail.get(key) is not None for key in ("price", "market_cap", "pe_ratio", "pb_ratio", "roe", "rsi")):
         cache_set(cache_key, detail)
-        return detail
-    except Exception:
-        traceback.print_exc()
-        return None
+    return detail

@@ -57,3 +57,24 @@ export function getChangeColor(value: number | null): string {
   if (value < 0) return "text-red-500";
   return "text-gray-500";
 }
+
+export function computeSMA(
+  data: { close: number | null }[],
+  period: number
+): (number | null)[] {
+  const result: (number | null)[] = [];
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    const close = data[i].close;
+    if (close == null) {
+      result.push(null);
+      continue;
+    }
+    sum += close;
+    if (i >= period) {
+      sum -= data[i - period].close ?? 0;
+    }
+    result.push(i >= period - 1 ? sum / period : null);
+  }
+  return result;
+}

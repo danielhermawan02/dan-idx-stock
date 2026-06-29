@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect } from "react";
 import useSWR from "swr";
 import { screenStocks } from "@/lib/api";
 import { ScreenerFilters } from "@/types/screener";
